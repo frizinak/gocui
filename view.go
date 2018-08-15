@@ -424,6 +424,7 @@ func (v *View) ViewBufferLines() []string {
 	for i, l := range v.viewLines {
 		str := lineType(l.line).String()
 		str = strings.Replace(str, "\x00", "", -1)
+		lines[i] = str
 	}
 	return lines
 }
