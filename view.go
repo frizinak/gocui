@@ -96,7 +96,7 @@ func (l lineType) String() string {
 }
 
 // newView returns a new View object.
-func newView(name string, x0, y0, x1, y1 int) *View {
+func newView(name string, x0, y0, x1, y1 int, mode OutputMode) *View {
 	v := &View{
 		name:    name,
 		x0:      x0,
@@ -106,7 +106,7 @@ func newView(name string, x0, y0, x1, y1 int) *View {
 		Frame:   true,
 		Editor:  DefaultEditor,
 		tainted: true,
-		ei:      newEscapeInterpreter(),
+		ei:      newEscapeInterpreter(mode),
 	}
 	return v
 }
@@ -383,6 +383,8 @@ func (v *View) Clear() {
 	v.tainted = true
 
 	v.lines = nil
+	v.viewLines = nil
+	v.readOffset = 0
 	v.clearRunes()
 }
 
@@ -396,11 +398,35 @@ func (v *View) clearRunes() {
 		}
 	}
 }
+// BuffeLines returns the liners in the view's internal
+// buffer.
+func (v *View) BufferLines() []string {
+	lines := make([]string, len(v.lines))
+	for i, l := range v.lines {
+		str := lineType(l).String()
+		str = strings.Replace(str, "\x00", "", -1)
+		lines[i] = str
+	}
+	return lines
+}
+
 
 // Buffer returns a string with the contents of the view's internal
 // buffer.
 func (v *View) Buffer() string {
 	return linesToString(v.lines)
+}
+
+// ViewBufferLines returns the lines in the view's internal
+// buffer that is shown to the user.
+func (v *View) ViewBufferLines() []string {
+	lines := make([]string, len(v.viewLines))
+	for i, l := range v.viewLines {
+		str := lineType(l.line).String()
+		str = strings.Replace(str, "\x00", "", -1)
+		lines[i] = str
+	}
+	return lines
 }
 
 // ViewBuffer returns a string with the contents of the view's buffer that is
