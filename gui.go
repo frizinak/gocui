@@ -18,6 +18,17 @@ var (
 	ErrUnknownView = errors.New("unknown view")
 )
 
+// OutputMode represents the terminal's output mode (8 or 256 colors).
+type OutputMode termbox.OutputMode
+
+const (
+	// OutputNormal provides 8-colors terminal mode.
+	OutputNormal = OutputMode(termbox.OutputNormal)
+
+	// Output256 provides 256-colors terminal mode.
+	Output256 = OutputMode(termbox.Output256)
+)
+
 // Gui represents the whole User Interface, including the views, layouts
 // and keybindings.
 type Gui struct {
@@ -28,6 +39,7 @@ type Gui struct {
 	managers    []Manager
 	keybindings []*keybinding
 	maxX, maxY  int
+	outputMode  OutputMode
 
 	// BgColor and FgColor allow to configure the background and foreground
 	// colors of the GUI.
@@ -50,19 +62,31 @@ type Gui struct {
 	// If InputEsc is true, when ESC sequence is in the buffer and it doesn't
 	// match any known sequence, ESC means KeyEsc.
 	InputEsc bool
+
+	// If ASCII is true then use ASCII instead of unicode to draw the
+	// interface. Using ASCII is more portable.
+	ASCII bool
 }
 
-// NewGui returns a new Gui object.
-func NewGui() (*Gui, error) {
+// NewGui returns a new Gui object with a given output mode.
+func NewGui(mode OutputMode) (*Gui, error) {
 	if err := termbox.Init(); err != nil {
 		return nil, err
 	}
+
 	g := &Gui{}
+
+	g.outputMode = mode
+	termbox.SetOutputMode(termbox.OutputMode(mode))
+
 	g.tbEvents = make(chan termbox.Event, 20)
 	g.userEvents = make(chan userEvent, 20)
+
 	g.maxX, g.maxY = termbox.Size()
-	g.BgColor, g.FgColor = ColorBlack, ColorWhite
-	g.SelBgColor, g.SelFgColor = ColorBlack, ColorWhite
+
+	g.BgColor, g.FgColor = ColorDefault, ColorDefault
+	g.SelBgColor, g.SelFgColor = ColorDefault, ColorDefault
+
 	return g, nil
 }
 
@@ -120,7 +144,7 @@ func (g *Gui) SetView(name string, x0, y0, x1, y1 int) (*View, error) {
 		return v, nil
 	}
 
-	v := newView(name, x0, y0, x1, y1)
+	v := newView(name, x0, y0, x1, y1, g.outputMode)
 	v.BgColor, v.FgColor = g.BgColor, g.FgColor
 	v.SelBgColor, v.SelFgColor = g.SelBgColor, g.SelFgColor
 	g.views = append(g.views, v)
@@ -133,6 +157,18 @@ func (g *Gui) SetViewOnTop(name string) (*View, error) {
 		if v.name == name {
 			s := append(g.views[:i], g.views[i+1:]...)
 			g.views = append(s, v)
+			return v, nil
+		}
+	}
+	return nil, ErrUnknownView
+}
+
+// SetViewOnBottom sets the given view on bottom of the existing ones.
+func (g *Gui) SetViewOnBottom(name string) (*View, error) {
+	for i, v := range g.views {
+		if v.name == name {
+			s := append(g.views[:i], g.views[i+1:]...)
+			g.views = append([]*View{v}, s...)
 			return v, nil
 		}
 	}
@@ -158,7 +194,9 @@ func (g *Gui) View(name string) (*View, error) {
 // ViewByPosition returns a pointer to a view matching the given position, or
 // error ErrUnknownView if a view in that position does not exist.
 func (g *Gui) ViewByPosition(x, y int) (*View, error) {
-	for _, v := range g.views {
+	// traverse views in reverse order checking top views first
+	for i := len(g.views); i > 0; i-- {
+		v := g.views[i-1]
 		if x > v.x0 && x < v.x1 && y > v.y0 && y < v.y1 {
 			return v, nil
 		}
@@ -265,11 +303,12 @@ type userEvent struct {
 	f func(*Gui) error
 }
 
-// Execute executes the given function. This function can be called safely from
-// a goroutine in order to update the GUI. It is important to note that it
-// won't be executed immediately, instead it will be added to the user events
-// queue.
-func (g *Gui) Execute(f func(*Gui) error) {
+// Update executes the passed function. This method can be called safely from a
+// goroutine in order to update the GUI. It is important to note that the
+// passed function won't be executed immediately, instead it will be added to
+// the user events queue. Given that Update spawns a goroutine, the order in
+// which the user events will be handled is not guaranteed.
+func (g *Gui) Update(f func(*Gui) error) {
 	go func() { g.userEvents <- userEvent{f: f} }()
 }
 
@@ -283,7 +322,7 @@ type Manager interface {
 // The ManagerFunc type is an adapter to allow the use of ordinary functions as
 // Managers. If f is a function with the appropriate signature, ManagerFunc(f)
 // is an Manager object that calls f.
-type ManagerFunc func(v *Gui) error
+type ManagerFunc func(*Gui) error
 
 // Layout calls f(g)
 func (f ManagerFunc) Layout(g *Gui) error {
@@ -303,7 +342,7 @@ func (g *Gui) SetManager(managers ...Manager) {
 
 // SetManagerFunc sets the given manager function. It deletes all views and
 // keybindings.
-func (g *Gui) SetManagerFunc(manager func(v *Gui) error) {
+func (g *Gui) SetManagerFunc(manager func(*Gui) error) {
 	g.SetManager(ManagerFunc(manager))
 }
 
@@ -430,17 +469,22 @@ func (g *Gui) flush() error {
 
 // drawFrameEdges draws the horizontal and vertical edges of a view.
 func (g *Gui) drawFrameEdges(v *View, fgColor, bgColor Attribute) error {
+	runeH, runeV := '─', '│'
+	if g.ASCII {
+		runeH, runeV = '-', '|'
+	}
+
 	for x := v.x0 + 1; x < v.x1 && x < g.maxX; x++ {
 		if x < 0 {
 			continue
 		}
 		if v.y0 > -1 && v.y0 < g.maxY {
-			if err := g.SetRune(x, v.y0, '─', fgColor, bgColor); err != nil {
+			if err := g.SetRune(x, v.y0, runeH, fgColor, bgColor); err != nil {
 				return err
 			}
 		}
 		if v.y1 > -1 && v.y1 < g.maxY {
-			if err := g.SetRune(x, v.y1, '─', fgColor, bgColor); err != nil {
+			if err := g.SetRune(x, v.y1, runeH, fgColor, bgColor); err != nil {
 				return err
 			}
 		}
@@ -450,12 +494,12 @@ func (g *Gui) drawFrameEdges(v *View, fgColor, bgColor Attribute) error {
 			continue
 		}
 		if v.x0 > -1 && v.x0 < g.maxX {
-			if err := g.SetRune(v.x0, y, '│', fgColor, bgColor); err != nil {
+			if err := g.SetRune(v.x0, y, runeV, fgColor, bgColor); err != nil {
 				return err
 			}
 		}
 		if v.x1 > -1 && v.x1 < g.maxX {
-			if err := g.SetRune(v.x1, y, '│', fgColor, bgColor); err != nil {
+			if err := g.SetRune(v.x1, y, runeV, fgColor, bgColor); err != nil {
 				return err
 			}
 		}
@@ -465,10 +509,15 @@ func (g *Gui) drawFrameEdges(v *View, fgColor, bgColor Attribute) error {
 
 // drawFrameCorners draws the corners of the view.
 func (g *Gui) drawFrameCorners(v *View, fgColor, bgColor Attribute) error {
+	runeTL, runeTR, runeBL, runeBR := '┌', '┐', '└', '┘'
+	if g.ASCII {
+		runeTL, runeTR, runeBL, runeBR = '+', '+', '+', '+'
+	}
+
 	corners := []struct {
 		x, y int
 		ch   rune
-	}{{v.x0, v.y0, '┌'}, {v.x1, v.y0, '┐'}, {v.x0, v.y1, '└'}, {v.x1, v.y1, '┘'}}
+	}{{v.x0, v.y0, runeTL}, {v.x1, v.y0, runeTR}, {v.x0, v.y1, runeBL}, {v.x1, v.y1, runeBR}}
 
 	for _, c := range corners {
 		if c.x >= 0 && c.y >= 0 && c.x < g.maxX && c.y < g.maxY {
